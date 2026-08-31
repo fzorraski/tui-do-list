@@ -1,8 +1,10 @@
-# Maintainer: Fabricio Zorraski <info@sparkag.com.br>
+# Maintainer: Fabricio Zorraski <fzorraski@gmail.com>
 # Binary package from the GitHub release tarballs built by
 # .github/workflows/release.yml. Keep pkgver aligned with the version in
 # Cargo.toml (and with PKGBUILD) when bumping, then regenerate .SRCINFO:
 #   makepkg --printsrcinfo > .SRCINFO
+# The release workflow pins the real sha256sums into its staged copy before
+# pushing to the AUR; the values here stay SKIP.
 pkgname=tui-do-list-bin
 _pkgname=tui-do-list
 pkgver=0.1.0
@@ -15,22 +17,22 @@ depends=(gcc-libs glibc)
 optdepends=('libnotify: desktop notifications via `tui-do-list notify`')
 provides=(tui-do-list)
 conflicts=(tui-do-list)
-source_x86_64=("$url/releases/download/v$pkgver/$_pkgname-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
-source_aarch64=("$url/releases/download/v$pkgver/$_pkgname-v$pkgver-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('SKIP') # TODO: fill in per release (updpkgsums)
+source_x86_64=("$_pkgname-linux-x86_64-$pkgver.tar.gz::$url/releases/download/v$pkgver/$_pkgname-linux-x86_64.tar.gz")
+source_aarch64=("$_pkgname-linux-aarch64-$pkgver.tar.gz::$url/releases/download/v$pkgver/$_pkgname-linux-aarch64.tar.gz")
+sha256sums_x86_64=('SKIP')
 sha256sums_aarch64=('SKIP')
 
 package() {
-  cd "$_pkgname-v$pkgver-$CARCH-unknown-linux-gnu"
-  install -Dm755 "$_pkgname" "$pkgdir/usr/bin/$_pkgname"
-  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-  install -Dm644 config.example.toml "$pkgdir/usr/share/doc/$pkgname/config.example.toml"
+  # The tarball is flat: binary, LICENSE, README.md, config.example.toml, contrib/.
+  install -Dm755 "$srcdir/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$srcdir/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$srcdir/config.example.toml" "$pkgdir/usr/share/doc/$pkgname/config.example.toml"
   # The shipped unit points at ~/.cargo/bin; the package installs to /usr/bin.
   sed 's|%h/.cargo/bin/tui-do-list|/usr/bin/tui-do-list|' \
-    contrib/tui-do-list-notify.service >tui-do-list-notify.service
+    "$srcdir/contrib/tui-do-list-notify.service" >tui-do-list-notify.service
   install -Dm644 tui-do-list-notify.service \
     "$pkgdir/usr/lib/systemd/user/tui-do-list-notify.service"
-  install -Dm644 contrib/tui-do-list-notify.timer \
+  install -Dm644 "$srcdir/contrib/tui-do-list-notify.timer" \
     "$pkgdir/usr/lib/systemd/user/tui-do-list-notify.timer"
 }

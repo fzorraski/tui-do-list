@@ -32,6 +32,6 @@
 
 ## Release / package notes
 - The release workflow (`.github/workflows/release.yml`) requires a semver tag `vX.Y.Z` that matches the `version` in `Cargo.toml`; the run fails on a mismatch.
-- AUR packaging lives in `packaging/aur/`; keep `pkgver` in both `PKGBUILD` (source build) and `PKGBUILD-bin` (release-tarball binary) aligned with `Cargo.toml` when bumping versions, and regenerate `.SRCINFO` (`makepkg --printsrcinfo > .SRCINFO`) before pushing to the AUR.
+- AUR packaging lives in `packaging/aur/`; keep `pkgver` in both `PKGBUILD` (source build) and `PKGBUILD-bin` (release-tarball binary) aligned with `Cargo.toml` when bumping versions. The release workflow pins the tarball sha256s into `PKGBUILD-bin` and pushes it to the AUR automatically when the `AUR_SSH_KEY` secret is set; the source `PKGBUILD` is published manually (regenerate `.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO`).
 - The source AUR build disables LTO and debug packages (`options=(!lto !debug)`) because Arch's makepkg defaults can otherwise cause link errors and debug-package extraction issues with Rust builds.
 - Release builds x86_64 natively with cargo and aarch64 with `cross`; native release tests only run for x86_64 in CI (the aarch64 binary is cross-compiled, never executed on the runner).

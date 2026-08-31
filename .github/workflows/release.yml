@@ -1,13 +1,21 @@
-# Publishes release artifacts when a semver tag `vX.Y.Z` is pushed.
-# The tag must match the version in Cargo.toml. x86_64 is built (and its
-# release tests run) natively with cargo; aarch64 is cross-compiled with
-# `cross` and never executed on the runner. The GitHub release is created
-# as a DRAFT — nothing is public until it is reviewed and published.
+# Publishes release artifacts when a semver tag `vX.Y.Z` is pushed, or via
+# manual dispatch for an existing tag. The tag must match the version in
+# Cargo.toml. x86_64 is built (and its release tests run) natively with
+# cargo; aarch64 is cross-compiled with `cross` and never executed on the
+# runner. The GitHub release is created (or updated, so re-runs are safe)
+# with install notes and checksums, and PKGBUILD-bin is pushed to the AUR
+# with pinned sha256s when the AUR_SSH_KEY secret is set.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag to build (e.g. v0.1.0)"
+        required: true
+        default: ""
 
 permissions:
   contents: write
@@ -16,18 +24,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  checks:
-    name: tag · fmt · clippy · test
+  quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - name: Tag must be semver and match Cargo.toml
+        env:
+          TAG: ${{ inputs.ref || github.ref_name }}
         run: |
-          echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            || { echo "tag '$GITHUB_REF_NAME' is not vX.Y.Z"; exit 1; }
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "tag '$TAG' is not vX.Y.Z"; exit 1; }
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          [ "v$version" = "$GITHUB_REF_NAME" ] \
-            || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml v$version"; exit 1; }
+          [ "v$version" = "$TAG" ] \
+            || { echo "tag $TAG does not match Cargo.toml v$version"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -37,82 +48,179 @@ jobs:
         run: ./build.sh
 
   build:
-    name: build (${{ matrix.target }})
-    needs: checks
-    runs-on: ubuntu-latest
+    needs: quality
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            use-cross: false
+            artifact: tui-do-list-linux-x86_64
+            builder: cargo
           - target: aarch64-unknown-linux-gnu
-            use-cross: true
+            artifact: tui-do-list-linux-aarch64
+            builder: cross
+    # 22.04's older glibc keeps the gnu binaries compatible with more distros.
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install cross
-        if: matrix.use-cross
+      - name: Install cross (aarch64 cross-compile via Docker)
+        if: matrix.builder == 'cross'
         uses: taiki-e/install-action@v2
         with:
           tool: cross
-      - name: Build (cross)
-        if: matrix.use-cross
-        run: cross build --release --locked --target ${{ matrix.target }}
-      - name: Build and run release tests (native)
-        if: ${{ !matrix.use-cross }}
+      - name: Test (native only — aarch64 binaries cannot run on the x86 runner)
+        if: matrix.builder == 'cargo'
+        run: cargo test --release --locked --target ${{ matrix.target }}
+      - name: Build release binary
+        run: ${{ matrix.builder }} build --release --locked --target ${{ matrix.target }}
+      - name: Create tarball
         run: |
-          cargo build --release --locked --target ${{ matrix.target }}
-          cargo test --release --locked --target ${{ matrix.target }}
-      - name: Package
+          STAGE=$(mktemp -d)
+          install -Dm0755 target/${{ matrix.target }}/release/tui-do-list "$STAGE/tui-do-list"
+          install -Dm0644 LICENSE "$STAGE/LICENSE"
+          install -Dm0644 README.md "$STAGE/README.md"
+          install -Dm0644 config.example.toml "$STAGE/config.example.toml"
+          install -Dm0644 contrib/tui-do-list-notify.service "$STAGE/contrib/tui-do-list-notify.service"
+          install -Dm0644 contrib/tui-do-list-notify.timer "$STAGE/contrib/tui-do-list-notify.timer"
+          tar czf ${{ matrix.artifact }}.tar.gz -C "$STAGE" \
+            tui-do-list LICENSE README.md config.example.toml contrib
+          rm -rf "$STAGE"
+      - name: Compute SHA256
         run: |
-          name="tui-do-list-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir "$name"
-          cp "target/${{ matrix.target }}/release/tui-do-list" "$name/"
-          cp README.md LICENSE config.example.toml "$name/"
-          cp -r contrib "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+          SHA=$(sha256sum ${{ matrix.artifact }}.tar.gz | awk '{print $1}')
+          echo "$SHA  ${{ matrix.artifact }}.tar.gz" > ${{ matrix.artifact }}.tar.gz.sha256
+          echo "Built ${{ matrix.artifact }}.tar.gz sha256=$SHA"
+      - uses: actions/upload-artifact@v5
         with:
-          name: ${{ matrix.target }}
+          name: ${{ matrix.artifact }}
           path: |
-            *.tar.gz
-            *.tar.gz.sha256
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
-    name: draft GitHub release
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0 # full history so the previous tag can be found
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
           merge-multiple: true
       - name: Verify checksums
-        run: sha256sum -c ./*.sha256
-      - name: Create draft release
+        run: cd artifacts && sha256sum -c ./*.sha256
+      - name: Generate release body
+        env:
+          TAG: ${{ inputs.ref || github.ref_name }}
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep -Fxv "$TAG" | head -1 || true)
+          {
+            echo "## Install"
+            echo
+            echo "### Arch (AUR)"
+            echo
+            echo '```bash'
+            echo "yay -S tui-do-list-bin      # prebuilt binary from this release"
+            echo '```'
+            echo
+            echo "### Manual"
+            echo
+            echo '```bash'
+            echo "ARCH=x86_64  # or aarch64"
+            echo "mkdir -p ~/.local/bin"
+            echo "curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/tui-do-list-linux-\$ARCH.tar.gz | tar xz -C ~/.local/bin tui-do-list"
+            echo '```'
+            echo
+            echo "## Checksums (SHA256)"
+            echo '```'
+            cat artifacts/*.sha256
+            echo '```'
+            if [ -n "$PREV_TAG" ]; then
+              echo
+              echo "**Full diff**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+            fi
+          } > body.md
+      - name: Create / update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref || github.ref_name }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "tui-do-list $GITHUB_REF_NAME" \
-            --draft --generate-notes \
-            ./*.tar.gz ./*.sha256
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.sha256 \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
+          else
+            gh release create "$TAG" artifacts/*.tar.gz artifacts/*.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "tui-do-list $TAG" \
+              --notes-file body.md \
+              --latest
+          fi
+
+  publish-aur:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.ref != ''
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Pin sha256s in PKGBUILD-bin
+        run: |
+          X86_SHA=$(awk '{print $1}' artifacts/tui-do-list-linux-x86_64.tar.gz.sha256)
+          ARM_SHA=$(awk '{print $1}' artifacts/tui-do-list-linux-aarch64.tar.gz.sha256)
+          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$X86_SHA')/" packaging/aur/PKGBUILD-bin
+          sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$ARM_SHA')/" packaging/aur/PKGBUILD-bin
+          mkdir -p staging/bin
+          cp packaging/aur/PKGBUILD-bin staging/bin/PKGBUILD
+      - name: Check AUR_SSH_KEY presence
+        id: aur_key
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "set=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping AUR push — no AUR_SSH_KEY secret set"
+          else
+            echo "set=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish tui-do-list-bin to AUR
+        if: steps.aur_key.outputs.set == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v2.7.2
+        with:
+          pkgname: tui-do-list-bin
+          pkgbuild: ./staging/bin/PKGBUILD
+          commit_username: fzorraski (GitHub Actions)
+          commit_email: fzorraski@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+          commit_message: "tui-do-list-bin ${{ inputs.ref || github.ref_name }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          force_push: "false"
 
   # Publishing to crates.io: uncomment after adding a CARGO_REGISTRY_TOKEN
   # repository secret (https://crates.io/settings/tokens).
   # publish-crate:
   #   name: publish to crates.io
-  #   needs: checks
+  #   needs: quality
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v5
+  #       with:
+  #         ref: ${{ inputs.ref || github.ref }}
   #     - uses: dtolnay/rust-toolchain@stable
   #     - run: cargo publish --locked
   #       env:

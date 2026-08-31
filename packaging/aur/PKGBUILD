@@ -1,4 +1,4 @@
-# Maintainer: Fabricio Zorraski <info@sparkag.com.br>
+# Maintainer: Fabricio Zorraski <fzorraski@gmail.com>
 # Source build. Keep pkgver aligned with the version in Cargo.toml (and with
 # PKGBUILD-bin) when bumping, then regenerate .SRCINFO:
 #   makepkg --printsrcinfo > .SRCINFO
