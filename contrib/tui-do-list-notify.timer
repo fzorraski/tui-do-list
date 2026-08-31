@@ -1,0 +1,9 @@
+[Unit]
+Description=Check tui-do-list reminders every minute
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,43 @@
+# Runs the same pipeline as ./build.sh on every push and pull request,
+# plus the CLI smoke checks and a build against the minimum supported Rust.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: fmt · clippy · test · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # The canonical gate: fmt check → clippy -D warnings → tests → release build.
+      - name: Run the project pipeline
+        run: ./build.sh
+      - name: CLI smoke checks
+        run: |
+          bin=target/release/tui-do-list
+          "$bin" --version
+          "$bin" --help
+          TUI_DO_LIST_FILE=/tmp/ci-smoke.json "$bin" export --all
+          TUI_DO_LIST_FILE=/tmp/ci-smoke.json "$bin" export --week --show-hidden
+
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --locked

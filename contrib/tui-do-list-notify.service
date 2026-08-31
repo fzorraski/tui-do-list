@@ -1,0 +1,6 @@
+[Unit]
+Description=tui-do-list reminder notifications
+
+[Service]
+Type=oneshot
+ExecStart=%h/.cargo/bin/tui-do-list notify

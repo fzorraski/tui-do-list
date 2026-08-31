@@ -1,0 +1,75 @@
+# tui-do-list configuration
+#
+# Copy to ~/.config/tui-do-list/config.toml (or point TUI_DO_LIST_CONFIG at a file).
+# Every setting is optional; delete what you do not want to change.
+
+# Named lists. Each one is stored as <name>.json in the data directory and
+# Tab cycles through them in this order. Default: ["tasks"].
+# Creating a list inside the app (`N` or `:newlist NAME`) appends it here.
+lists = ["tasks"]
+# lists = ["personal", "work"]
+
+# Start with the priority sort switched on (overdue reminders and high priority
+# first, done tasks last). `s` toggles it at any time. Default: false.
+sort_by_priority = false
+
+# Ask "y/n" before deleting a task. You can always `u` to undo, so this is
+# off by default.
+confirm_delete = false
+
+# How far back `tui-do-list notify` looks for reminders, in seconds. Match it to
+# how often the systemd timer runs (contrib/ runs it every minute).
+notify_window_secs = 60
+
+# Colours: ratatui names (black, red, green, yellow, blue, magenta, cyan, gray,
+# dark_gray, light_red, light_green, light_yellow, light_blue, light_magenta,
+# light_cyan, white), "#rrggbb", or an ANSI index such as "208".
+[colors]
+# high      = "red"        # high-priority marker and text
+# low       = "dark_gray"  # low-priority marker
+# today     = "green"      # "Today" label, progress when complete, streak
+# other_day = "magenta"    # labels for other days
+# reminder  = "cyan"       # upcoming reminder
+# overdue   = "red"        # overdue reminder, delete confirmation
+# accent    = "yellow"     # prompts, active list, help keys, calendar days with open tasks
+# age       = "yellow"     # "(3d)" age markers and "most postponed"
+# repeat    = "blue"       # "↻ daily" marker
+# done_day  = "green"      # calendar days where everything is done
+
+# Keys for the task list. A value replaces ALL default keys for that action and
+# may list several keys separated by spaces. Names: a single character, or
+# space enter tab backtab esc backspace del ins up down left right home end
+# pgup pgdn f1..f12. Every key may be bound to only one action.
+[keys]
+# down         = "j down"
+# up           = "k up"
+# first        = "g"
+# last         = "G"
+# add          = "a"
+# edit         = "e"
+# toggle       = "space x enter"
+# delete       = "d"
+# undo         = "u"
+# move_down    = "J"
+# move_up      = "K"
+# priority     = "p"
+# reminder     = "r"
+# repeat       = "R"
+# note         = "n"
+# hide         = "H"
+# reveal       = "v"
+# postpone     = ">"
+# move_to_date = "m"
+# sort         = "s"
+# search       = "/"
+# review       = "w"
+# prev_day     = "h left"
+# next_day     = "l right"
+# today        = "t"
+# calendar     = "c"
+# next_list    = "tab"
+# new_list     = "N"
+# help         = "?"
+# command      = ":"
+# quit         = ""             # unbound by default — quit with :q or Ctrl-C.
+#                               # Set quit = "q esc" to restore direct quitting.
