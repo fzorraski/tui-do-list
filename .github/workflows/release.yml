@@ -1,0 +1,119 @@
+# Publishes release artifacts when a semver tag `vX.Y.Z` is pushed.
+# The tag must match the version in Cargo.toml. x86_64 is built (and its
+# release tests run) natively with cargo; aarch64 is cross-compiled with
+# `cross` and never executed on the runner. The GitHub release is created
+# as a DRAFT — nothing is public until it is reviewed and published.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: tag · fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must be semver and match Cargo.toml
+        run: |
+          echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "tag '$GITHUB_REF_NAME' is not vX.Y.Z"; exit 1; }
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$GITHUB_REF_NAME" ] \
+            || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml v$version"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # The canonical gate: fmt check → clippy -D warnings → tests → release build.
+      - name: Run the project pipeline
+        run: ./build.sh
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: checks
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use-cross: false
+          - target: aarch64-unknown-linux-gnu
+            use-cross: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build (cross)
+        if: matrix.use-cross
+        run: cross build --release --locked --target ${{ matrix.target }}
+      - name: Build and run release tests (native)
+        if: ${{ !matrix.use-cross }}
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          cargo test --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name="tui-do-list-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/tui-do-list" "$name/"
+          cp README.md LICENSE config.example.toml "$name/"
+          cp -r contrib "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: draft GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Verify checksums
+        run: sha256sum -c ./*.sha256
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "tui-do-list $GITHUB_REF_NAME" \
+            --draft --generate-notes \
+            ./*.tar.gz ./*.sha256
+
+  # Publishing to crates.io: uncomment after adding a CARGO_REGISTRY_TOKEN
+  # repository secret (https://crates.io/settings/tokens).
+  # publish-crate:
+  #   name: publish to crates.io
+  #   needs: checks
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - run: cargo publish --locked
+  #       env:
+  #         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

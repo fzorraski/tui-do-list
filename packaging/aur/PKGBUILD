@@ -1,0 +1,52 @@
+# Maintainer: Fabricio Zorraski <info@sparkag.com.br>
+# Source build. Keep pkgver aligned with the version in Cargo.toml (and with
+# PKGBUILD-bin) when bumping, then regenerate .SRCINFO:
+#   makepkg --printsrcinfo > .SRCINFO
+pkgname=tui-do-list
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A daily to-do list TUI with bullet-journal style carry-over"
+arch=(x86_64 aarch64)
+url="https://github.com/OWNER/tui-do-list" # TODO: set the real repository URL
+license=(MIT)
+depends=(gcc-libs glibc)
+makedepends=(cargo)
+optdepends=('libnotify: desktop notifications via `tui-do-list notify`')
+# Arch's makepkg defaults (LTO flags, debug package extraction) can break the
+# Rust link step and debug splitting — build without them.
+options=(!lto !debug)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP') # TODO: fill in per release (updpkgsums)
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 config.example.toml "$pkgdir/usr/share/doc/$pkgname/config.example.toml"
+  # The shipped unit points at ~/.cargo/bin; the package installs to /usr/bin.
+  sed 's|%h/.cargo/bin/tui-do-list|/usr/bin/tui-do-list|' \
+    contrib/tui-do-list-notify.service >tui-do-list-notify.service
+  install -Dm644 tui-do-list-notify.service \
+    "$pkgdir/usr/lib/systemd/user/tui-do-list-notify.service"
+  install -Dm644 contrib/tui-do-list-notify.timer \
+    "$pkgdir/usr/lib/systemd/user/tui-do-list-notify.timer"
+}

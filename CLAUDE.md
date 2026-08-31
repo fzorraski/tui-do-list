@@ -29,3 +29,9 @@
 - Add a regression test with every bug fix; model/config/cli/storage tests are plain unit tests (no terminal needed).
 - Colours come from `Theme` (10 named slots), never raw `Color::*` in `ui.rs` for anything a user might want to restyle.
 - Docs live in `README.md` (user-facing) and `config.example.toml` (every setting, commented); update both when behaviour or keys change.
+
+## Release / package notes
+- The release workflow (`.github/workflows/release.yml`) requires a semver tag `vX.Y.Z` that matches the `version` in `Cargo.toml`; the run fails on a mismatch.
+- AUR packaging lives in `packaging/aur/`; keep `pkgver` in both `PKGBUILD` (source build) and `PKGBUILD-bin` (release-tarball binary) aligned with `Cargo.toml` when bumping versions, and regenerate `.SRCINFO` (`makepkg --printsrcinfo > .SRCINFO`) before pushing to the AUR.
+- The source AUR build disables LTO and debug packages (`options=(!lto !debug)`) because Arch's makepkg defaults can otherwise cause link errors and debug-package extraction issues with Rust builds.
+- Release builds x86_64 natively with cargo and aarch64 with `cross`; native release tests only run for x86_64 in CI (the aarch64 binary is cross-compiled, never executed on the runner).
