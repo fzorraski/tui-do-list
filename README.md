@@ -49,14 +49,24 @@ per list, no daemon, no network.
 - **Priorities** — `p` cycles none → low (`·`) → high (`!`).
 - **Sort view** — `s` toggles between your manual order and "overdue reminders
   and high priority first, done last".
+- **Focus view** — `f` hides completed tasks so the page shows only what is
+  left (`hide_done = true` starts that way). Progress and history are
+  unaffected; it is a view, not a filter on the data.
 - **Search** — `/` searches text and notes across every day; `Enter` jumps to
   the hit.
 - **Weekly review** — `w` shows your streak, completions per day for the last
   7 days, what is still open, and the most-postponed tasks.
-- **Multiple lists** — e.g. `personal` and `work`, each in its own file;
-  `Tab` switches, `N` (or `:newlist NAME`) creates one from inside the app.
+- **Multiple lists** — e.g. `personal` and `work`, each in its own file.
+  `L` opens a **list picker** showing every list with its open-task count and
+  a `+ New list` row; `Tab` cycles, `N` (or `:newlist NAME`) creates one from
+  inside the app.
+- **Split view** — `|` shows the next list in a read-only pane on the right,
+  for the same day and under the same sort and focus settings. `Tab` moves
+  the active list along, so the pane always shows what comes next. Needs a
+  terminal at least 60 columns wide; `split = true` starts that way.
 - **Undo delete** (`u`), optional **delete confirmation**, a **progress line**
-  in the footer, and **configurable keys and colours**.
+  in the footer, and **configurable keys and colours** with five built-in
+  **theme presets** (`default`, `nord`, `dawn`, `matrix`, `slate`).
 - **Export to Markdown** — `tui-do-list export --week`.
 - **Safe storage** — every change is written atomically.
 
@@ -103,12 +113,15 @@ Defaults; every key in the first table can be changed in the config file.
 | `>` | postpone to the next day |
 | `m` | move to a date — pick it in the calendar |
 | `s` | toggle the priority sort |
+| `f` | focus: hide / show completed tasks |
 | `/` | search all days |
 | `w` | weekly review and stats |
 | `h` / `l`, `←` / `→` | previous / next day |
 | `t` | jump back to today |
 | `c` | open the calendar |
 | `Tab` | switch to the next list |
+| `L` | list picker: switch to any list, or create one from the `+ New list` row |
+| `\|` | split view: the next list read-only in a right-hand pane |
 | `N` | create a new list (prompts for the name) |
 | `?` | key reference (scrolls with `j`/`k`) |
 | `:` | command line — `:q` (also `:q!`, `:wq`) quits, `:w` saves now, `:newlist NAME` creates a list |
@@ -130,6 +143,16 @@ config.
 | `Esc` | close |
 
 Days with open tasks are yellow, fully completed days green, today underlined.
+
+### In the list picker
+
+| Key | Action |
+|---|---|
+| `j` / `k`, `↓` / `↑`, `Tab` | move between lists |
+| `g` / `G` | first list / the `+ New list` row |
+| `Enter` | switch to the list, or open the new-list prompt on the last row |
+| `N` | new-list prompt directly |
+| `Esc`, `q`, `L` | close |
 
 ### In search, review and help
 
@@ -168,20 +191,24 @@ comments. Summary:
 lists = ["personal", "work"]   # Tab cycles; each is <name>.json in the data dir
                                 # (`N` / `:newlist NAME` in the app appends here)
 sort_by_priority = false        # start with the sort switched on
+hide_done = false               # start in focus view (completed tasks hidden)
+split = false                   # start with the read-only side pane open
 confirm_delete = false          # ask y/n before deleting
 notify_window_secs = 60         # how far back `tui-do-list notify` looks
+theme = "default"               # default, nord, dawn, matrix, slate
 
-[colors]                        # ratatui names, "#rrggbb" or ANSI index
-high = "red"                    # high, low, today, other_day, reminder,
-overdue = "light_red"           # overdue, accent, age, repeat, done_day
+[colors]                        # ratatui names, "#rrggbb" or ANSI index;
+high = "red"                    # applied on top of the theme preset:
+overdue = "light_red"           # high, low, today, other_day, reminder,
+                                # overdue, accent, age, repeat, done_day
 
 [keys]                          # space-separated; replaces the defaults
 add = "i"
 toggle = "space enter"
 ```
 
-A malformed file, an unknown colour or key name, or a key bound twice is
-reported at startup instead of being silently ignored.
+A malformed file, an unknown theme, colour or key name, or a key bound twice
+is reported at startup instead of being silently ignored.
 
 ## Desktop notifications (optional)
 

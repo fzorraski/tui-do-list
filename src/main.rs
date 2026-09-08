@@ -40,7 +40,7 @@ fn load_config() -> Result<Config> {
 fn run_tui() -> Result<()> {
     let config = load_config()?;
     let keymap = Keymap::from_config(&config.keys).context("config.toml")?;
-    let theme = Theme::from_config(&config.colors).context("config.toml")?;
+    let theme = Theme::from_config(&config.theme, &config.colors).context("config.toml")?;
     // One interactive instance at a time, so saves cannot clobber each other.
     let paths = storage::list_paths(&config)?;
     let _lock = storage::acquire_lock(&paths[0].1)?;
@@ -51,6 +51,9 @@ fn run_tui() -> Result<()> {
     app.theme = theme;
     app.sorted = config.sort_by_priority;
     app.confirm_delete = config.confirm_delete;
+    app.hide_done = config.hide_done;
+    app.split = config.split;
+    save_inactive_lists(&mut app)?;
     app.lists_mutable = std::env::var_os(storage::ENV_OVERRIDE).is_none();
 
     let result = ratatui::run(|terminal| -> Result<()> {
@@ -75,6 +78,7 @@ fn run_tui() -> Result<()> {
             if dirty {
                 storage::save(&app.path, &app.store)?;
             }
+            save_inactive_lists(&mut app)?;
         }
         Ok(())
     });
@@ -86,6 +90,17 @@ fn run_tui() -> Result<()> {
         storage::save(path, store).with_context(|| format!("saving {}", path.display()))?;
     }
     result
+}
+
+/// Persists the inactive lists after carry-over touched them (startup and
+/// midnight), so the side pane never shows state that is not on disk.
+fn save_inactive_lists(app: &mut App) -> Result<()> {
+    if app.take_others_dirty() {
+        for (path, store) in app.all_lists().into_iter().skip(1) {
+            storage::save(path, store).with_context(|| format!("saving {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Creates the data file for a new list and records it in config.toml
