@@ -24,6 +24,12 @@ pub struct Config {
     pub sort_by_priority: bool,
     /// Ask `y/n` before deleting a task.
     pub confirm_delete: bool,
+    /// Start with completed tasks hidden from the day view (`f` toggles it).
+    pub hide_done: bool,
+    /// Start with the read-only side pane showing the next list (`|` toggles it).
+    pub split: bool,
+    /// Named colour preset that `[colors]` overrides are applied on top of.
+    pub theme: String,
     /// Seconds before "now" that `tui-do-list notify` looks back for reminders.
     pub notify_window_secs: u64,
     pub colors: HashMap<String, String>,
@@ -36,6 +42,9 @@ impl Default for Config {
             lists: vec![DEFAULT_LIST.to_string()],
             sort_by_priority: false,
             confirm_delete: false,
+            hide_done: false,
+            split: false,
+            theme: Theme::DEFAULT_PRESET.to_string(),
             notify_window_secs: 60,
             colors: HashMap::new(),
             keys: HashMap::new(),
@@ -167,6 +176,69 @@ impl Default for Theme {
 }
 
 impl Theme {
+    pub const DEFAULT_PRESET: &str = "default";
+
+    /// Built-in presets selectable with `theme = "..."`. `default` uses the
+    /// terminal's own 16 colours; the others are fixed 24-bit palettes.
+    pub const PRESETS: &[&str] = &["default", "nord", "dawn", "matrix", "slate"];
+
+    /// The preset called `name`, or `None` when there is no such preset.
+    pub fn preset(name: &str) -> Option<Self> {
+        let rgb = |h: u32| Color::Rgb((h >> 16) as u8, (h >> 8) as u8, h as u8);
+        Some(match name {
+            "default" => Self::default(),
+            "nord" => Self {
+                high: rgb(0xBF616A),
+                low: rgb(0x4C566A),
+                today: rgb(0xA3BE8C),
+                other_day: rgb(0xB48EAD),
+                reminder: rgb(0x88C0D0),
+                overdue: rgb(0xBF616A),
+                accent: rgb(0xEBCB8B),
+                age: rgb(0xD08770),
+                repeat: rgb(0x81A1C1),
+                done_day: rgb(0xA3BE8C),
+            },
+            "dawn" => Self {
+                high: rgb(0xB4637A),
+                low: rgb(0x9893A5),
+                today: rgb(0x56949F),
+                other_day: rgb(0x907AA9),
+                reminder: rgb(0x286983),
+                overdue: rgb(0xB4637A),
+                accent: rgb(0xEA9D34),
+                age: rgb(0xD7827E),
+                repeat: rgb(0x286983),
+                done_day: rgb(0x56949F),
+            },
+            "matrix" => Self {
+                high: rgb(0xCCFF99),
+                low: rgb(0x2E5C2E),
+                today: rgb(0x00FF41),
+                other_day: rgb(0x5FAF5F),
+                reminder: rgb(0x9CFFB0),
+                overdue: rgb(0xFFFF66),
+                accent: rgb(0x00FF41),
+                age: rgb(0x7FBF7F),
+                repeat: rgb(0x3FBF7F),
+                done_day: rgb(0x00FF41),
+            },
+            "slate" => Self {
+                high: rgb(0xE06C75),
+                low: rgb(0x5C6370),
+                today: rgb(0x98C379),
+                other_day: rgb(0xC678DD),
+                reminder: rgb(0x56B6C2),
+                overdue: rgb(0xE06C75),
+                accent: rgb(0xE5C07B),
+                age: rgb(0xD19A66),
+                repeat: rgb(0x61AFEF),
+                done_day: rgb(0x98C379),
+            },
+            _ => return None,
+        })
+    }
+
     pub const NAMES: &[&str] = &[
         "high",
         "low",
@@ -180,10 +252,16 @@ impl Theme {
         "done_day",
     ];
 
-    /// Applies `[colors]` overrides. Values are ratatui colour names
-    /// (`red`, `light_blue`, `gray`…), `#rrggbb`, or an ANSI index.
-    pub fn from_config(colors: &HashMap<String, String>) -> Result<Self> {
-        let mut theme = Self::default();
+    /// Starts from the `theme = "..."` preset and applies `[colors]`
+    /// overrides. Values are ratatui colour names (`red`, `light_blue`,
+    /// `gray`…), `#rrggbb`, or an ANSI index.
+    pub fn from_config(preset: &str, colors: &HashMap<String, String>) -> Result<Self> {
+        let mut theme = Self::preset(preset).ok_or_else(|| {
+            anyhow!(
+                "unknown theme {preset:?} (valid: {})",
+                Self::PRESETS.join(", ")
+            )
+        })?;
         for (name, value) in colors {
             let color = Color::from_str(value)
                 .map_err(|_| anyhow!("[colors] {name}: unknown colour {value:?}"))?;
@@ -244,7 +322,10 @@ pub enum Action {
     Postpone,
     MoveToDate,
     NextList,
+    Lists,
     NewList,
+    HideDone,
+    Split,
 }
 
 impl Action {
@@ -356,6 +437,12 @@ impl Action {
             "toggle priority sort",
         ),
         (
+            Action::HideDone,
+            "hide_done",
+            &[KeyCode::Char('f')],
+            "focus: hide/show completed tasks",
+        ),
+        (
             Action::Search,
             "search",
             &[KeyCode::Char('/')],
@@ -398,10 +485,22 @@ impl Action {
             "switch to the next list",
         ),
         (
+            Action::Lists,
+            "lists",
+            &[KeyCode::Char('L')],
+            "open the list picker (switch or create a list)",
+        ),
+        (
             Action::NewList,
             "new_list",
             &[KeyCode::Char('N')],
             "create a new list (also :newlist NAME)",
+        ),
+        (
+            Action::Split,
+            "split",
+            &[KeyCode::Char('|')],
+            "split: show the next list in a read-only side pane",
         ),
         (
             Action::Help,
@@ -614,13 +713,41 @@ mod tests {
 
     #[test]
     fn theme_overrides_and_validates() {
-        let theme =
-            Theme::from_config(&map(&[("high", "#ff8800"), ("today", "light_blue")])).unwrap();
+        let theme = Theme::from_config(
+            "default",
+            &map(&[("high", "#ff8800"), ("today", "light_blue")]),
+        )
+        .unwrap();
         assert_eq!(theme.high, Color::Rgb(255, 136, 0));
         assert_eq!(theme.today, Color::LightBlue);
         assert_eq!(theme.low, Theme::default().low);
-        assert!(Theme::from_config(&map(&[("high", "not-a-colour")])).is_err());
-        assert!(Theme::from_config(&map(&[("border", "red")])).is_err());
+        assert!(Theme::from_config("default", &map(&[("high", "not-a-colour")])).is_err());
+        assert!(Theme::from_config("default", &map(&[("border", "red")])).is_err());
+    }
+
+    #[test]
+    fn theme_presets_apply_under_overrides() {
+        for name in Theme::PRESETS {
+            assert!(Theme::preset(name).is_some(), "{name}");
+        }
+        assert_eq!(Theme::preset("default"), Some(Theme::default()));
+        let nord = Theme::from_config("nord", &HashMap::new()).unwrap();
+        assert_ne!(nord, Theme::default());
+        assert_eq!(nord.accent, Color::Rgb(0xEB, 0xCB, 0x8B));
+        // [colors] wins over the preset, slot by slot.
+        let tweaked = Theme::from_config("nord", &map(&[("accent", "red")])).unwrap();
+        assert_eq!(tweaked.accent, Color::Red);
+        assert_eq!(tweaked.high, nord.high);
+        let err = Theme::from_config("solarized", &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown theme") && err.contains("nord"),
+            "{err}"
+        );
+        assert_eq!(Config::default().theme, "default");
+        assert!(!Config::default().hide_done);
+        assert!(!Config::default().split);
     }
 
     #[test]

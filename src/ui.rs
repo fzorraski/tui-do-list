@@ -12,7 +12,7 @@ use ratatui::widgets::{
 
 use crate::app::{App, Mode, Target};
 use crate::config::{Action, Theme};
-use crate::model::{Priority, Task};
+use crate::model::{Priority, Store, Task};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let input_height = u16::from(matches!(app.mode, Mode::Insert(_) | Mode::Command(_)));
@@ -37,7 +37,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .areas(frame.area());
 
     render_header(frame, header, app);
-    render_list(frame, body, app);
+    // Split view: the active list keeps the left half; the next list is
+    // drawn read-only on the right. Too narrow a terminal falls back to one.
+    match app.side_list() {
+        Some((name, store)) if body.width >= MIN_SPLIT_WIDTH => {
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(body);
+            render_list(frame, left, app);
+            render_side_pane(frame, right, app, name, store);
+        }
+        _ => render_list(frame, body, app),
+    }
     if let Some(note) = note {
         render_note(frame, note_area, &note);
     }
@@ -80,6 +91,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         Mode::Search { .. } => render_search(frame, frame.area(), app),
         Mode::Review { scroll } => render_review(frame, frame.area(), app, scroll),
+        Mode::Lists { selected } => render_lists(frame, frame.area(), app, selected),
         _ => {}
     }
 }
@@ -133,6 +145,9 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     }
     if app.sorted {
         spans.push(Span::styled("  ⇅ sorted", Style::new().dim()));
+    }
+    if app.hide_done {
+        spans.push(Span::styled("  ◐ focus", Style::new().dim()));
     }
     spans.push(Span::styled(
         format!(
@@ -228,23 +243,35 @@ fn task_item(
     ListItem::new(Line::from(spans))
 }
 
-fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_list(frame: &mut Frame, area: Rect, app: &App) {
     let tasks = app.store.tasks(app.date);
-    if tasks.is_empty() {
-        let add = app.first_key(Action::Add);
-        let msg = if app.date == app.today {
-            format!("No tasks — press {add} to add one")
+    let visible = app.visible();
+    if visible.is_empty() {
+        let k = |a| app.first_key(a);
+        let lines: Vec<Line> = if !tasks.is_empty() {
+            // Every task is done and the focus view hides them.
+            vec![
+                Line::from("All done for this day  ✓"),
+                Line::from(format!("{} shows completed tasks", k(Action::HideDone))),
+            ]
+        } else if app.date == app.today {
+            vec![Line::from(format!(
+                "No tasks — press {} to add one",
+                k(Action::Add)
+            ))]
         } else {
-            format!("Nothing recorded for this day — press {add} to add a task")
+            vec![Line::from(format!(
+                "Nothing recorded for this day — press {} to add a task",
+                k(Action::Add)
+            ))]
         };
-        let [centered] = Layout::vertical([Constraint::Length(1)])
+        let [centered] = Layout::vertical([Constraint::Length(lines.len() as u16)])
             .flex(Flex::Center)
             .areas(area);
-        frame.render_widget(Paragraph::new(msg).dim().centered(), centered);
+        frame.render_widget(Paragraph::new(lines).dim().centered(), centered);
         return;
     }
-    let items: Vec<ListItem> = app
-        .visible()
+    let items: Vec<ListItem> = visible
         .into_iter()
         .map(|i| {
             let masked = tasks[i].hidden && !app.reveal;
@@ -257,6 +284,55 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         .highlight_symbol("> ");
     let mut state = ListState::default().with_selected(Some(app.selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Narrowest terminal that still gets two usable panes.
+const MIN_SPLIT_WIDTH: u16 = 60;
+
+/// The read-only pane of the split view: `store`'s tasks for the viewed day,
+/// under the same sort and focus flags as the active list, but dimmed and
+/// without a cursor.
+fn render_side_pane(frame: &mut Frame, area: Rect, app: &App, name: &str, store: &Store) {
+    let tasks = store.tasks(app.date);
+    let mut order = if app.sorted {
+        store.sorted_indices(app.date, app.today, app.now)
+    } else {
+        (0..tasks.len()).collect()
+    };
+    if app.hide_done {
+        order.retain(|&i| !tasks[i].done);
+    }
+    let (done, total) = store.progress(app.date);
+    let block = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Style::new().dim())
+        .title(Line::from(vec![
+            Span::styled(format!(" {name} "), Style::new().fg(app.theme.accent)),
+            Span::styled(format!("{done}/{total} done "), Style::new().dim()),
+        ]))
+        .padding(Padding::horizontal(1));
+    if order.is_empty() {
+        let msg = if tasks.is_empty() {
+            "no tasks"
+        } else {
+            "all done"
+        };
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let [centered] = Layout::vertical([Constraint::Length(1)])
+            .flex(Flex::Center)
+            .areas(inner);
+        frame.render_widget(Paragraph::new(msg).dim().centered(), centered);
+        return;
+    }
+    let items: Vec<ListItem> = order
+        .into_iter()
+        .map(|i| {
+            let masked = tasks[i].hidden && !app.reveal;
+            task_item(&tasks[i], app.date, app.today, app.now, &app.theme, masked)
+        })
+        .collect();
+    frame.render_widget(List::new(items).block(block).dim(), area);
 }
 
 /// One line for the border plus up to four wrapped lines of text.
@@ -337,6 +413,13 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         (Mode::Help { .. } | Mode::Review { .. }, _) => {
             ("j/k scroll · Esc close".to_string(), Style::new().dim())
         }
+        (Mode::Lists { .. }, _) => (
+            format!(
+                "j/k select · Enter open · {} new list · Esc close",
+                k(Action::NewList)
+            ),
+            Style::new().dim(),
+        ),
         _ => (
             format!(
                 "{} add · {} edit · {} del · {} done · {} prio · {} search · {} help · :q quit",
@@ -388,6 +471,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App, scroll: u16) {
             "←/→ Home End · Backspace/Del · Enter save · Esc cancel",
         ),
         ("Search", "type · ↑/↓ select · Enter jump · Esc close"),
+        ("Lists", "j/k select · Enter switch or create · Esc close"),
         ("Config", "keys and colours: see config.example.toml"),
     ];
     lines.extend(extra.iter().map(|(k, v)| {
@@ -407,6 +491,69 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App, scroll: u16) {
         ),
         popup,
     );
+}
+
+/// The list picker: one row per list plus a "+ New list" button row.
+fn render_lists(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
+    let rows = app.list_rows();
+    let name_width = rows
+        .iter()
+        .map(|(n, ..)| n.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut items: Vec<ListItem> = rows
+        .iter()
+        .map(|&(name, open, active)| {
+            let name_style = if active {
+                Style::new().fg(app.theme.accent).bold()
+            } else {
+                Style::new()
+            };
+            let open_text = match open {
+                0 => "all done".to_string(),
+                1 => "1 open".to_string(),
+                n => format!("{n} open"),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{name:<name_width$}"), name_style),
+                Span::styled(format!("  {open_text}"), Style::new().dim()),
+                Span::styled(if active { "  ← active" } else { "" }, Style::new().dim()),
+            ]))
+        })
+        .collect();
+    let new_row = if app.lists_mutable {
+        Line::from(vec![
+            Span::styled("+ New list", Style::new().fg(app.theme.accent)),
+            Span::styled(
+                format!("  ({})", app.first_key(Action::NewList)),
+                Style::new().dim(),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            format!(
+                "+ New list (fixed while ${} is set)",
+                crate::storage::ENV_OVERRIDE
+            ),
+            Style::new().dim(),
+        ))
+    };
+    items.push(ListItem::new(new_row));
+
+    let width = (name_width as u16 + 32).clamp(30, area.width.saturating_sub(4));
+    let height = (items.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let popup = centered(area, width, height);
+    frame.render_widget(Clear, popup);
+    let list = List::new(items)
+        .block(
+            Block::bordered()
+                .title(" Lists ")
+                .padding(Padding::horizontal(1)),
+        )
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 
 fn render_search(frame: &mut Frame, area: Rect, app: &App) {

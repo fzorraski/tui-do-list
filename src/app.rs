@@ -90,6 +90,11 @@ pub enum Mode {
     /// Vim-style command line opened with `:` — `:q` quits, `:w` saves.
     Command(Editor),
     ConfirmDelete(usize),
+    /// List picker; `selected` indexes `list_names()` order, with one extra
+    /// row after the last list for "+ New list".
+    Lists {
+        selected: usize,
+    },
 }
 
 /// One named list with its own data file.
@@ -125,6 +130,12 @@ pub struct App {
     pub reveal: bool,
     /// Show overdue/high-priority first instead of manual order.
     pub sorted: bool,
+    /// Focus view: completed tasks are left out of the day view.
+    pub hide_done: bool,
+    /// Show the next list in a read-only pane beside the active one.
+    pub split: bool,
+    /// Carry-over changed an inactive list; the main loop saves them.
+    others_dirty: bool,
     pub confirm_delete: bool,
     pub keymap: Keymap,
     pub theme: Theme,
@@ -157,6 +168,12 @@ impl App {
         let mut store = active.store;
         let carried = store.carry_over(today);
         let status = (carried > 0).then(|| format!("Carried over {carried} unfinished task(s)"));
+        // Inactive lists are carried over too, so the side pane and the list
+        // picker's counts show the same "today" the list would on activation.
+        let mut others_dirty = false;
+        for l in &mut lists {
+            others_dirty |= l.store.carry_over(today) > 0;
+        }
         Self {
             store,
             list_name: active.name,
@@ -172,6 +189,9 @@ impl App {
             quit: false,
             reveal: false,
             sorted: false,
+            hide_done: false,
+            split: false,
+            others_dirty,
             confirm_delete: false,
             keymap: Keymap::default(),
             theme: Theme::default(),
@@ -200,11 +220,50 @@ impl App {
 
     /// Indices into `store.tasks(date)` in display order.
     pub fn visible(&self) -> Vec<usize> {
-        if self.sorted {
+        let mut order = if self.sorted {
             self.store.sorted_indices(self.date, self.today, self.now)
         } else {
             (0..self.len()).collect()
+        };
+        if self.hide_done {
+            let tasks = self.store.tasks(self.date);
+            order.retain(|&i| !tasks[i].done);
         }
+        order
+    }
+
+    /// Number of rows on screen (`len()` minus hidden completed tasks).
+    pub fn visible_len(&self) -> usize {
+        self.visible().len()
+    }
+
+    /// True once when carry-over changed an inactive list since the last call.
+    pub fn take_others_dirty(&mut self) -> bool {
+        mem::take(&mut self.others_dirty)
+    }
+
+    /// The list shown in the side pane: the next one in `Tab` order, when the
+    /// split view is on and there is more than one list.
+    pub fn side_list(&self) -> Option<(&str, &Store)> {
+        self.others
+            .first()
+            .filter(|_| self.split)
+            .map(|l| (l.name.as_str(), &l.store))
+    }
+
+    /// `(name, open tasks, is active)` for every list, in `list_names()` order.
+    pub fn list_rows(&self) -> Vec<(&str, usize, bool)> {
+        let mut rows = vec![(
+            self.list_name.as_str(),
+            self.store.open_tasks(self.today).len(),
+            true,
+        )];
+        rows.extend(
+            self.others
+                .iter()
+                .map(|l| (l.name.as_str(), l.store.open_tasks(self.today).len(), false)),
+        );
+        rows
     }
 
     /// The real index of the selected task, if any.
@@ -226,12 +285,17 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        self.selected = self.selected.min(self.len().saturating_sub(1));
+        self.selected = self.selected.min(self.visible_len().saturating_sub(1));
     }
 
     /// Keeps the task at real index `idx` selected after the order changed.
+    /// A task that just left the view (completed while `hide_done` is on)
+    /// leaves the cursor where it was, clamped to the rows that remain.
     fn select_task(&mut self, idx: usize) {
-        self.selected = self.visible().iter().position(|&i| i == idx).unwrap_or(0);
+        match self.visible().iter().position(|&i| i == idx) {
+            Some(pos) => self.selected = pos,
+            None => self.clamp_selection(),
+        }
     }
 
     /// Search hits for the query being typed (empty outside search mode).
@@ -305,6 +369,9 @@ impl App {
             self.date = now;
         }
         let carried = self.store.carry_over(now);
+        for other in &mut self.others {
+            self.others_dirty |= other.store.carry_over(now) > 0;
+        }
         self.clamp_selection();
         if carried > 0 {
             self.status = Some(format!("New day: carried over {carried} task(s)"));
@@ -333,6 +400,7 @@ impl App {
                 self.handle_scrolling(key);
                 false
             }
+            Mode::Lists { selected } => self.handle_lists(key, selected),
         }
     }
 
@@ -383,16 +451,50 @@ impl App {
                 self.mode = Mode::Command(Editor::new("", Target::Command));
             }
 
-            (Action::Down, _) if self.selected + 1 < self.len() => self.selected += 1,
+            (Action::Down, _) if self.selected + 1 < self.visible_len() => self.selected += 1,
             (Action::Up, _) => self.selected = self.selected.saturating_sub(1),
             (Action::First, _) => self.selected = 0,
-            (Action::Last, _) => self.selected = self.len().saturating_sub(1),
+            (Action::Last, _) => self.selected = self.visible_len().saturating_sub(1),
 
             (Action::PrevDay, _) => self.go_to(date - Days::new(1)),
             (Action::NextDay, _) => self.go_to(date + Days::new(1)),
             (Action::Today, _) => self.go_to(self.today),
             (Action::NextList, _) => return self.switch_list(),
+            (Action::Lists, _) => self.mode = Mode::Lists { selected: 0 },
             (Action::NewList, _) => self.open_new_list_prompt(),
+            (Action::Split, _) => {
+                if self.others.is_empty() {
+                    self.status = Some(format!(
+                        "Only one list — press {} to create another",
+                        self.first_key(Action::NewList)
+                    ));
+                } else {
+                    self.split = !self.split;
+                    self.status = Some(
+                        if self.split {
+                            "Split view: the next list is shown read-only on the right"
+                        } else {
+                            "Split view off"
+                        }
+                        .into(),
+                    );
+                }
+            }
+            (Action::HideDone, _) => {
+                self.hide_done = !self.hide_done;
+                match task {
+                    Some(idx) => self.select_task(idx),
+                    None => self.selected = 0,
+                }
+                self.status = Some(
+                    if self.hide_done {
+                        "Focus: completed tasks hidden"
+                    } else {
+                        "Showing completed tasks"
+                    }
+                    .into(),
+                );
+            }
             (Action::Sort, _) => {
                 self.sorted = !self.sorted;
                 match task {
@@ -563,16 +665,26 @@ impl App {
 
     fn switch_list(&mut self) -> bool {
         if self.others.is_empty() {
-            self.status = Some("Only one list — add `lists = [...]` to config.toml".into());
+            self.status = Some(format!(
+                "Only one list — press {} to create another",
+                self.first_key(Action::NewList)
+            ));
             return false;
         }
         let next = self.others.remove(0);
+        let current = self.activate(next);
+        self.others.push(current);
+        true
+    }
+
+    /// Makes `next` the active list and returns the one it replaced. Applies
+    /// carry-over to the newly active list and resets the view to today.
+    fn activate(&mut self, next: ListSlot) -> ListSlot {
         let current = ListSlot {
             name: mem::replace(&mut self.list_name, next.name),
             path: mem::replace(&mut self.path, next.path),
             store: mem::replace(&mut self.store, next.store),
         };
-        self.others.push(current);
         let carried = self.store.carry_over(self.today);
         self.undo.clear();
         self.date = self.today;
@@ -581,7 +693,60 @@ impl App {
             0 => format!("List: {}", self.list_name),
             n => format!("List: {} · carried over {n} task(s)", self.list_name),
         });
+        current
+    }
+
+    /// Activates the list at `pos` in `list_names()` order. The lists keep
+    /// their cyclic order, so `Tab` continues from the new position.
+    fn switch_list_to(&mut self, pos: usize) -> bool {
+        if pos == 0 || pos > self.others.len() {
+            return false;
+        }
+        // Cycle before: active, o0 … ok … on. After choosing ok the cycle
+        // reads ok, ok+1 … on, active, o0 … ok-1.
+        let k = pos - 1;
+        let next = self.others.remove(k);
+        let previous = self.activate(next);
+        self.others.rotate_left(k);
+        let at = self.others.len() - k;
+        self.others.insert(at, previous);
         true
+    }
+
+    /// List picker keys. Mutates the store only when a switch carries tasks.
+    fn handle_lists(&mut self, key: KeyEvent, selected: usize) -> bool {
+        let rows = self.others.len() + 2; // every list plus "+ New list"
+        let next = match key.code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => (selected + 1).min(rows - 1),
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => selected.saturating_sub(1),
+            KeyCode::Char('g') | KeyCode::Home => 0,
+            KeyCode::Char('G') | KeyCode::End => rows - 1,
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                if selected + 1 == rows {
+                    self.open_new_list_prompt();
+                    return false;
+                }
+                return self.switch_list_to(selected);
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                return false;
+            }
+            code => {
+                match self.keymap.action(code) {
+                    Some(Action::Lists) => self.mode = Mode::Normal,
+                    Some(Action::NewList) => {
+                        self.mode = Mode::Normal;
+                        self.open_new_list_prompt();
+                    }
+                    _ => {}
+                }
+                return false;
+            }
+        };
+        self.mode = Mode::Lists { selected: next };
+        false
     }
 
     fn open_new_list_prompt(&mut self) {
@@ -1201,10 +1366,12 @@ mod tests {
         let mut app = App::with_lists(lists, d(31));
         assert_eq!(app.list_names(), ["personal", "work"]);
         add(&mut app, "groceries");
+        assert!(app.take_others_dirty(), "inactive list was carried over");
+        assert!(!app.take_others_dirty(), "reported once");
         assert!(press(&mut app, KeyCode::Tab));
         assert_eq!(app.list_name, "work");
-        assert_eq!(texts(&app), ["late report"], "carried over on activation");
-        assert!(app.status.as_deref().unwrap().contains("carried over 1"));
+        assert_eq!(texts(&app), ["late report"], "carried over at startup");
+        assert_eq!(app.status.as_deref(), Some("List: work"));
         assert!(press(&mut app, KeyCode::Tab));
         assert_eq!(app.list_name, "personal");
         assert_eq!(texts(&app), ["groceries"]);
@@ -1213,6 +1380,200 @@ mod tests {
         let mut single = App::new(Store::default(), d(31));
         assert!(!press(&mut single, KeyCode::Tab));
         assert!(single.status.as_deref().unwrap().contains("Only one list"));
+    }
+
+    fn three_lists(today: NaiveDate) -> App {
+        let mut work = Store::default();
+        work.add(today, "report");
+        work.add(today, "standup");
+        let mut home = Store::default();
+        home.add(today, "laundry");
+        App::with_lists(
+            vec![
+                ListSlot {
+                    name: "personal".into(),
+                    path: PathBuf::from("/tmp/p.json"),
+                    store: Store::default(),
+                },
+                ListSlot {
+                    name: "work".into(),
+                    path: PathBuf::from("/tmp/w.json"),
+                    store: work,
+                },
+                ListSlot {
+                    name: "home".into(),
+                    path: PathBuf::from("/tmp/h.json"),
+                    store: home,
+                },
+            ],
+            today,
+        )
+    }
+
+    #[test]
+    fn list_picker_switches_directly_and_keeps_cycle_order() {
+        let mut app = three_lists(d(31));
+        assert_eq!(
+            app.list_rows(),
+            [
+                ("personal", 0, true),
+                ("work", 2, false),
+                ("home", 1, false)
+            ]
+        );
+
+        press(&mut app, KeyCode::Char('L'));
+        assert!(matches!(app.mode, Mode::Lists { selected: 0 }));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert!(matches!(app.mode, Mode::Lists { selected: 2 }));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.list_name, "home");
+        assert_eq!(texts(&app), ["laundry"]);
+        // Cyclic order is preserved: Tab continues after "home".
+        assert_eq!(app.list_names(), ["home", "personal", "work"]);
+
+        // Enter on the active row is a no-op; the cursor cannot leave the rows.
+        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Char('G'));
+        assert!(matches!(app.mode, Mode::Lists { selected: 3 }));
+        press(&mut app, KeyCode::Char('j'));
+        assert!(matches!(app.mode, Mode::Lists { selected: 3 }));
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('k'));
+        assert!(matches!(app.mode, Mode::Lists { selected: 0 }));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.list_name, "home");
+
+        // Esc and the picker key itself close it.
+        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Char('L'));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn list_picker_new_list_row_opens_the_prompt() {
+        let mut app = three_lists(d(31));
+        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Char('G')); // "+ New list"
+        press(&mut app, KeyCode::Enter);
+        match &app.mode {
+            Mode::Insert(e) => assert_eq!(e.target, Target::NewList),
+            other => panic!("expected new-list prompt, got {other:?}"),
+        }
+        type_text(&mut app, "errands");
+        assert!(!press(&mut app, KeyCode::Enter));
+        assert_eq!(app.take_pending_new_list().as_deref(), Some("errands"));
+
+        // The new-list key works from inside the picker too.
+        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Char('N'));
+        assert!(matches!(app.mode, Mode::Insert(_)));
+        press(&mut app, KeyCode::Esc);
+
+        // With a pinned data file the row is inert and explains why.
+        app.lists_mutable = false;
+        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.status.as_deref().unwrap().contains("fixed"));
+
+        let mut single = App::new(Store::default(), d(31));
+        press(&mut single, KeyCode::Tab);
+        assert!(single.status.as_deref().unwrap().contains("press N"));
+    }
+
+    #[test]
+    fn split_shows_the_next_list_read_only() {
+        let mut app = three_lists(d(31));
+        assert!(app.side_list().is_none(), "off by default");
+        assert!(!press(&mut app, KeyCode::Char('|')), "no store change");
+        assert!(app.split);
+        let (name, store) = app.side_list().unwrap();
+        assert_eq!(name, "work");
+        assert_eq!(store.tasks(d(31)).len(), 2);
+        // Tab moves along the cycle; the pane follows.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.list_name, "work");
+        assert_eq!(app.side_list().unwrap().0, "home");
+        press(&mut app, KeyCode::Char('|'));
+        assert!(!app.split);
+        assert!(app.side_list().is_none());
+        assert!(app.status.as_deref().unwrap().contains("off"));
+
+        let mut single = App::new(Store::default(), d(31));
+        press(&mut single, KeyCode::Char('|'));
+        assert!(!single.split);
+        assert!(single.status.as_deref().unwrap().contains("Only one list"));
+    }
+
+    #[test]
+    fn rollover_carries_inactive_lists_too() {
+        let mut app = three_lists(d(31));
+        app.take_others_dirty();
+        add(&mut app, "mine");
+        // Midnight: every list's unfinished tasks move to the new day.
+        assert!(app.check_date_rollover(sep(1)));
+        assert_eq!(texts(&app), ["mine"]);
+        assert!(app.take_others_dirty());
+        app.split = true;
+        let (_, work) = app.side_list().unwrap();
+        assert_eq!(work.tasks(sep(1)).len(), 2);
+        assert!(work.tasks(d(31)).is_empty());
+    }
+
+    #[test]
+    fn hide_done_filters_the_view_and_clamps_the_selection() {
+        let mut app = App::new(Store::default(), d(31));
+        add(&mut app, "one");
+        add(&mut app, "two");
+        add(&mut app, "three");
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char(' ')); // "two" done
+        assert_eq!(app.selected_task(), Some(1));
+
+        press(&mut app, KeyCode::Char('f'));
+        assert!(app.hide_done);
+        assert_eq!(app.visible(), [0, 2]);
+        assert_eq!(app.visible_len(), 2);
+        assert_eq!(app.len(), 3, "the store still holds every task");
+        assert_eq!(
+            app.selected_task(),
+            Some(2),
+            "cursor stays on a visible row"
+        );
+        // Movement is bounded by the visible rows, not the store.
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected, 1);
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.selected, 1);
+
+        // Completing the last row keeps the cursor on the remaining task.
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.visible(), [0]);
+        assert_eq!(app.selected_task(), Some(0));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.visible(), Vec::<usize>::new());
+        assert_eq!(app.selected_task(), None);
+        assert_eq!(app.store.progress(d(31)), (3, 3));
+
+        // Toggling focus off brings everything back, in order.
+        press(&mut app, KeyCode::Char('f'));
+        assert!(!app.hide_done);
+        assert_eq!(app.visible(), [0, 1, 2]);
+        assert!(app.status.as_deref().unwrap().contains("Showing"));
+
+        // Focus combines with the priority sort: done tasks drop out.
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.visible(), Vec::<usize>::new());
+        press(&mut app, KeyCode::Char(' ')); // nothing selected: no-op
+        assert_eq!(app.store.progress(d(31)), (3, 3));
     }
 
     #[test]
